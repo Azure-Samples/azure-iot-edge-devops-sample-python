@@ -3,7 +3,6 @@
 # full license information.
 
 import random
-import ptvsd
 import time
 import sys
 import iothub_client
@@ -12,8 +11,6 @@ import os
 # pylint: disable=E0611
 from iothub_client import IoTHubModuleClient, IoTHubClientError, IoTHubTransportProvider, DeviceMethodReturnValue
 from iothub_client import IoTHubMessage, IoTHubMessageDispositionResult, IoTHubError
-
-ptvsd.enable_attach(('0.0.0.0',  5678))
 
 # messageTimeout - the maximum time in milliseconds until a message times out.
 # The timeout period starts at IoTHubModuleClient.send_event_async.
@@ -86,7 +83,6 @@ def filter_message(message):
 
 def module_twin_callback(update_state, payload, user_context):
     global TEMPERATURE_THRESHOLD
-    ptvsd.break_into_debugger()
 
     properties_obj  = json.loads(payload)
 
