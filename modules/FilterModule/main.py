@@ -29,9 +29,12 @@ DESIRED_PROPERTY_KEY = "desired"
 PROTOCOL = IoTHubTransportProvider.MQTT
 
 # Callback received when the message that we're forwarding is processed.
+
+
 def send_confirmation_callback(message, result, user_context):
     global SEND_CALLBACKS
-    print("Confirmation[%d] received for message with result = %s" % (user_context, result))
+    print("Confirmation[%d] received for message with result = %s" % (
+        user_context, result))
     map_properties = message.properties()
     key_value_pair = map_properties.get_internals()
     print("    Properties: %s" % key_value_pair)
@@ -41,6 +44,8 @@ def send_confirmation_callback(message, result, user_context):
 # receive_message_callback is invoked when an incoming message arrives on the specified
 # input queue (in the case of this sample, "input1").  Because this is a filter module,
 # we will forward this message onto the "output1" queue.
+
+
 def receive_message_callback(message, hubManager):
     try:
         filtered_message = filter_message(message)
@@ -62,11 +67,14 @@ def filter_message(message):
 
     message_obj = json.loads(message_str)
     if message_obj["machine"]["temperature"] > TEMPERATURE_THRESHOLD:
-        print(" Machine temperature : %d exceeds threshold %d" % (message_obj["machine"]["temperature"], TEMPERATURE_THRESHOLD))
+        print(" Machine temperature : %d exceeds threshold %d" %
+              (message_obj["machine"]["temperature"], TEMPERATURE_THRESHOLD))
         filtered_message = IoTHubMessage(message_str)
 
-        filtered_message.set_content_type_system_property(message.get_content_type_system_property() or "application/json")
-        filtered_message.set_content_encoding_system_property(message.get_content_encoding_system_property() or "utf-8")
+        filtered_message.set_content_type_system_property(
+            message.get_content_type_system_property() or "application/json")
+        filtered_message.set_content_encoding_system_property(
+            message.get_content_encoding_system_property() or "utf-8")
 
         prop_map = filtered_message.properties()
 
@@ -84,7 +92,7 @@ def filter_message(message):
 def module_twin_callback(update_state, payload, user_context):
     global TEMPERATURE_THRESHOLD
 
-    properties_obj  = json.loads(payload)
+    properties_obj = json.loads(payload)
 
     if DESIRED_PROPERTY_KEY in properties_obj:
         properties_obj = properties_obj[DESIRED_PROPERTY_KEY]
@@ -122,7 +130,8 @@ class HubManager(object):
 
         # sets the callback when a message arrives on "input1" queue.  Messages sent to
         # other inputs or to the default will be silently discarded.
-        self.client.set_message_callback("input1", receive_message_callback, self)
+        self.client.set_message_callback(
+            "input1", receive_message_callback, self)
 
         self.client.set_module_twin_callback(module_twin_callback, 0)
         self.client.set_module_method_callback(
@@ -141,7 +150,8 @@ def main(protocol):
 
         hub_manager = HubManager(protocol)
 
-        print("Starting the IoT Hub Python sample using protocol %s..." % hub_manager.client_protocol)
+        print("Starting the IoT Hub Python sample using protocol %s..." %
+              hub_manager.client_protocol)
         print("The sample is now waiting for messages and will indefinitely.  Press Ctrl-C to exit. ")
 
         while True:
