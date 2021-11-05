@@ -2,157 +2,123 @@
 # Licensed under the MIT license. See LICENSE file in the project root for
 # full license information.
 
-import random
-import time
-import sys
-import iothub_client
+import asyncio
 import json
-import os
-# pylint: disable=E0611
-from iothub_client import IoTHubModuleClient, IoTHubClientError, IoTHubTransportProvider, DeviceMethodReturnValue
-from iothub_client import IoTHubMessage, IoTHubMessageDispositionResult, IoTHubError
+import signal
+import threading
+from azure.iot.device.aio import IoTHubModuleClient
+from azure.iot.device import Message, MethodResponse
+from azure.iot.device.exceptions import ClientError, OperationTimeout
 
-# messageTimeout - the maximum time in milliseconds until a message times out.
-# The timeout period starts at IoTHubModuleClient.send_event_async.
-# By default, messages do not expire.
-MESSAGE_TIMEOUT = 10000
 
-# global counters
-SEND_CALLBACKS = 0
-
-TEMP_THRESHOLD_PROPERTY_NAME = "TemperatureThreshold"
 TEMPERATURE_THRESHOLD = 25
+TEMP_THRESHOLD_PROPERTY_NAME = "TemperatureThreshold"
 HEART_BEAT = "heartbeat"
-DESIRED_PROPERTY_KEY = "desired"
 
-# Choose HTTP, AMQP or MQTT as transport protocol.  Currently only MQTT is supported.
-PROTOCOL = IoTHubTransportProvider.MQTT
 
-# Callback received when the message that we're forwarding is processed.
-def send_confirmation_callback(message, result, user_context):
-    global SEND_CALLBACKS
-    print("Confirmation[%d] received for message with result = %s" % (user_context, result))
-    map_properties = message.properties()
-    key_value_pair = map_properties.get_internals()
-    print("    Properties: %s" % key_value_pair)
-    SEND_CALLBACKS += 1
-    print("    Total calls confirmed: %d" % SEND_CALLBACKS)
+def create_client():
+    client = IoTHubModuleClient.create_from_edge_environment()
 
-# receive_message_callback is invoked when an incoming message arrives on the specified
-# input queue (in the case of this sample, "input1").  Because this is a filter module,
-# we will forward this message onto the "output1" queue.
-def receive_message_callback(message, hubManager):
+    # Define function for handling received messages
+    async def receive_message_handler(message):
+        try:
+            filtered_message = filter_message(message)
+        except KeyError as e:
+            print("Error when filtering message: %s" % e)
+        else:
+            if filtered_message:
+                await client.send_message_to_output(filtered_message, "output1")
+                print("Forwarded message to Hub")
+
+    def twin_patch_received_handler(twin_patch):
+        """Update the TEMPERATURE THRESHOLD value if its twin property is updated"""
+        global TEMPERATURE_THRESHOLD
+
+        if TEMP_THRESHOLD_PROPERTY_NAME in twin_patch:
+            TEMPERATURE_THRESHOLD = twin_patch[TEMP_THRESHOLD_PROPERTY_NAME]
+
+    async def method_request_received_handler(method_request):
+        print("Received method request [{}]".format(method_request.name))
+        # Send the heart beat message to the corresponding output
+        heart_beat_message = Message("Module [FilterModule] is running")
+        heart_beat_message.custom_properties["MessageType"] = HEART_BEAT
+        await client.send_message_to_output(HEART_BEAT, heart_beat_message)
+        print("Heart beat message sent to heart beat output")
+
+        # Send the message response 
+        response_payload = "{ \"Response\": \"This is the response from the device\" }"
+        method_response = MethodResponse.create_from_method_request(
+            method_request=method_request, status=200, payload=response_payload)
+        await client.send_method_response(method_response)
+        print("Method response to [{}] sent".format(method_request.name))
+
     try:
-        filtered_message = filter_message(message)
+        # Attach client handlers
+        client.on_message_received = receive_message_handler
+        client.on_twin_desired_properties_patch_received = twin_patch_received_handler
+        client.on_method_request_received = method_request_received_handler
+    except:
+        # Clean up in the event of failure
+        client.shutdown()
+        raise
 
-        if filtered_message:
-            hubManager.forward_event_to_output("output1", filtered_message, 0)
-        return IoTHubMessageDispositionResult.ACCEPTED
-    except Exception as e:
-        print("Error when filter message: %s" % e)
-        return IoTHubMessageDispositionResult.ABANDONED
+    return client
 
 
 def filter_message(message):
-    message_buffer = message.get_bytearray()
-    size = len(message_buffer)
-    message_str = message_buffer[:size].decode('utf-8')
+    message_str = message.data.decode("utf-8)")
+
     if not message_str:
         return None
-
+    
+    print("RECEIVED:")
+    print(message_str)
     message_obj = json.loads(message_str)
-    if message_obj["machine"]["temperature"] > TEMPERATURE_THRESHOLD:
-        print(" Machine temperature : %d exceeds threshold %d" % (message_obj["machine"]["temperature"], TEMPERATURE_THRESHOLD))
-        filtered_message = IoTHubMessage(message_str)
+    message_temp = message_obj["machine"]["temperature"]
 
-        filtered_message.set_content_type_system_property(message.get_content_type_system_property() or "application/json")
-        filtered_message.set_content_encoding_system_property(message.get_content_encoding_system_property() or "utf-8")
+    if message_temp > TEMPERATURE_THRESHOLD:
+        print("Machine temperature {} exceeds threshold {}".format(message_temp, TEMPERATURE_THRESHOLD))
 
-        prop_map = filtered_message.properties()
-
-        origin_prop_key_value_pair = message.properties().get_internals()
-        for key in origin_prop_key_value_pair:
-            prop_map.add(key, origin_prop_key_value_pair[key])
-
-        prop_map.add("MessageType", "Alert")
-
-        return filtered_message
+        message.custom_properties["MessageType"] = "Alert"
+        return message
     else:
         return None
 
 
-def module_twin_callback(update_state, payload, user_context):
-    global TEMPERATURE_THRESHOLD
+def main():
+    print("Filter Module")
+    print("Press Ctrl-C to exit")
 
-    properties_obj  = json.loads(payload)
+    # Event indicating sample stop
+    stop_event = threading.Event()
 
-    if DESIRED_PROPERTY_KEY in properties_obj:
-        properties_obj = properties_obj[DESIRED_PROPERTY_KEY]
+    # Define a signal handler that will indicate Edge termination of the Filter Module
+    def module_termination_handler(signal, frame):
+        print("Filter Module stopped")
+        stop_event.set
 
-    if TEMP_THRESHOLD_PROPERTY_NAME in properties_obj:
-        TEMPERATURE_THRESHOLD = properties_obj[TEMP_THRESHOLD_PROPERTY_NAME]
+    # Attach the signal handler
+    signal.signal(signal.SIGTERM, module_termination_handler)
 
+    # Instantiate the client. Use the same instance of the client for the duration of
+    # your application
+    client = create_client()
 
-def module_method_callback(method_name, payload, hubManager):
-    print("Received method [%s]" % (method_name))
-    message_str = "Module [FilterModule] is Running"
-    heart_beat_messsage = IoTHubMessage(message_str)
-    prop_map = heart_beat_messsage.properties()
-    prop_map.add("MessageType", HEART_BEAT)
-    hubManager.forward_event_to_output(HEART_BEAT, heart_beat_messsage, 0)
-    print("Sent method response via event [%s]" % HEART_BEAT)
-
-    device_method_return_value = DeviceMethodReturnValue()
-    device_method_return_value.status = 200
-    device_method_return_value.response = "{ \"Response\": \"This is the response from the device\" }"
-    return device_method_return_value
-
-
-class HubManager(object):
-
-    def __init__(
-            self,
-            protocol=IoTHubTransportProvider.MQTT):
-        self.client_protocol = protocol
-        self.client = IoTHubModuleClient()
-        self.client.create_from_environment(protocol)
-
-        # set the time until a message times out
-        self.client.set_option("messageTimeout", MESSAGE_TIMEOUT)
-
-        # sets the callback when a message arrives on "input1" queue.  Messages sent to
-        # other inputs or to the default will be silently discarded.
-        self.client.set_message_callback("input1", receive_message_callback, self)
-
-        self.client.set_module_twin_callback(module_twin_callback, 0)
-        self.client.set_module_method_callback(
-            module_method_callback, self)
-
-    # Forwards the message received onto the next stage in the process.
-    def forward_event_to_output(self, outputQueueName, event, send_context):
-        self.client.send_event_async(
-            outputQueueName, event, send_confirmation_callback, send_context)
-
-
-def main(protocol):
+    loop = asyncio.get_event_loop()
     try:
-        print("\nPython %s\n" % sys.version)
-        print("IoT Hub Client for Python")
-
-        hub_manager = HubManager(protocol)
-
-        print("Starting the IoT Hub Python sample using protocol %s..." % hub_manager.client_protocol)
-        print("The sample is now waiting for messages and will indefinitely.  Press Ctrl-C to exit. ")
-
-        while True:
-            time.sleep(1)
-
-    except IoTHubError as iothub_error:
-        print("Unexpected error %s from IoTHub" % iothub_error)
-        return
-    except KeyboardInterrupt:
-        print("IoTHubModuleClient sample stopped")
-
+        print("Starting the Filter Module...")
+        loop.run_until_complete(client.connect())
+        print("The sample is now waiting for messages indefinitely")
+        # This event will be triggered by Edge termination signal
+        stop_event.wait()
+    except ClientError as e:
+        print("Unexpected client error %s" % e)
+        raise
+    finally:
+        # Graceful exit
+        print("Shutting down client")
+        loop.run_until_complete(client.shutdown())
+        loop.close()
 
 if __name__ == '__main__':
-    main(PROTOCOL)
+    main()
